@@ -1,0 +1,14 @@
+cache/
+out/
+artifacts/
+node_modules/
+
+.env
+.env.*
+!.env.example
+
+broadcast/
+coverage/
+lcov.info
+
+*.log

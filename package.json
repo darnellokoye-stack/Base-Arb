@@ -1,0 +1,14 @@
+{
+  "name": "base-triangle-arb",
+  "version": "0.2.0",
+  "private": true,
+  "scripts": {
+    "scan": "node bot/scanner.js",
+    "scan:flash": "FLASH_MODE=1 node bot/scanner.js",
+    "base:new-pools": "node bot/base-edges/new-pool-listener.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "viem": "^2.21.0"
+  }
+}
