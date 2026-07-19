@@ -91,9 +91,18 @@ BASE_TRIANGLE_ARB=0x...          # from deployment
 BASE_UNIV2_ADAPTER=0x...
 BASE_AERODROME_ADAPTER=0x...
 PRIVATE_KEY=0x...                # omit to dry-run only
+OWNER_ADDRESS=0x...              # required for dry-run gas/simulation if PRIVATE_KEY is omitted
+SLIPPAGE_BPS=50                  # optional, per-leg output floor buffer; default 0.50%
 npm run scan                     # pre-funded mode
 npm run scan:flash               # Aave V3 flash-loan mode
 ```
+
+In flash mode, the scanner now reads Aave's live
+`FLASHLOAN_PREMIUM_TOTAL()`, subtracts the flash premium from quote P&L,
+adds the gas-aware profit floor, applies per-leg slippage floors to the
+exact calldata, and runs an `eth_call` simulation before any transaction is
+submitted. If the exact calldata cannot clear the contract's
+`minProfit` guard, it is skipped.
 
 ## The solo-dev edges (Base-specific angle, separate from the core
 migration above)

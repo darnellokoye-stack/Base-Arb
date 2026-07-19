@@ -79,6 +79,7 @@ module.exports = {
   // live gas price + buffer, recomputed every scan, not a static threshold.
   gasPriceBufferBps: BigInt(process.env.GAS_PRICE_BUFFER_BPS || 2000), // +20%
   minProfitMarginBps: BigInt(process.env.MIN_PROFIT_MARGIN_BPS || 0),
+  slippageBps: BigInt(process.env.SLIPPAGE_BPS || 50), // 0.50% per leg
 
   amountInWei: BigInt(process.env.AMOUNT_IN_WEI || "100000000000000000"), // 0.1 WETH default
 };

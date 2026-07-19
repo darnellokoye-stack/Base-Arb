@@ -80,6 +80,16 @@ const AERODROME_ROUTER_ABI = [
   },
 ];
 
+const AAVE_POOL_ABI = [
+  {
+    name: "FLASHLOAN_PREMIUM_TOTAL",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "uint128" }],
+  },
+];
+
 const HOP_COMPONENTS = [
   { name: "tokenIn", type: "address" },
   { name: "tokenOut", type: "address" },
@@ -241,6 +251,22 @@ async function checkFlashLoanCapacity(startToken, amountIn) {
   }
 }
 
+async function getAaveFlashPremium(amountIn) {
+  const premiumBps = await publicClient.readContract({
+    address: cfg.flashLoan.aavePool,
+    abi: AAVE_POOL_ABI,
+    functionName: "FLASHLOAN_PREMIUM_TOTAL",
+  });
+  return {
+    premiumBps,
+    premium: (amountIn * premiumBps) / 10000n,
+  };
+}
+
+function applySlippageFloor(amount) {
+  return (amount * (10000n - cfg.slippageBps)) / 10000n;
+}
+
 async function gasCostInStartToken(legs, amountIn, minProfitGuess, startToken) {
   if (!ESTIMATION_ACCOUNT) {
     throw new Error(
@@ -277,6 +303,26 @@ async function gasCostInStartToken(legs, amountIn, minProfitGuess, startToken) {
   }
 
   return gasCostWei;
+}
+
+async function simulateExecution(legs, amountIn, minProfit) {
+  if (!ESTIMATION_ACCOUNT) {
+    throw new Error(
+      "No PRIVATE_KEY or OWNER_ADDRESS set â€” cannot simulate execution " +
+      "(the eth_call needs a `from` that passes onlyOwner)."
+    );
+  }
+
+  const deadline = BigInt(Math.floor(Date.now() / 1000) + 300);
+  const simulation = await publicClient.simulateContract({
+    address: CONTRACT_ADDRESS,
+    abi: TRIANGLE_ARB_ABI,
+    functionName: CONTRACT_FUNCTION,
+    args: [legs, amountIn, minProfit, deadline],
+    account: ESTIMATION_ACCOUNT,
+  });
+
+  return simulation.result;
 }
 
 function legsUseFlashLenderProtocol(legs) {
@@ -332,29 +378,58 @@ async function scanOnce() {
     return;
   }
 
+  const usdcOutMin = applySlippageFloor(usdcOut);
+  const wethBackMin = applySlippageFloor(wethBack);
+
   const legs = [
     {
       adapter: cfg.contracts.uniswapV2Adapter,
       hops: [{
         tokenIn: cfg.tokens.WETH,
         tokenOut: cfg.tokens.USDC,
-        amountOutMin: 0n,
+        amountOutMin: usdcOutMin,
         extraData: "0x",
       }],
-      amountOutMin: 0n,
+      amountOutMin: usdcOutMin,
     },
     {
       adapter: cfg.contracts.aerodromeAdapter,
       hops: [{
         tokenIn: cfg.tokens.USDC,
         tokenOut: cfg.tokens.WETH,
-        amountOutMin: 0n,
+        amountOutMin: wethBackMin,
         // abi.encode(bool stable, address factory) — see AerodromeAdapter.sol
         extraData: encodeAerodromeExtraData(aerodromeStable, cfg.dexes.aerodromeFactory),
       }],
-      amountOutMin: 0n,
+      amountOutMin: wethBackMin,
     },
   ];
+
+  let flashPremium = 0n;
+  let flashPremiumBps = 0n;
+  if (FLASH_MODE) {
+    try {
+      const flashFee = await getAaveFlashPremium(amountIn);
+      flashPremium = flashFee.premium;
+      flashPremiumBps = flashFee.premiumBps;
+    } catch (err) {
+      console.error("Aave flash premium read failed:", err.shortMessage || err.message);
+      return;
+    }
+  }
+
+  const grossProfit = wethBack > amountIn ? wethBack - amountIn : 0n;
+  const netProfitBeforeGas = grossProfit > flashPremium ? grossProfit - flashPremium : 0n;
+
+  if (FLASH_MODE && netProfitBeforeGas === 0n) {
+    console.log(
+      `[${new Date().toISOString()}] ${formatUnits(amountIn, 18)} WETH -> ` +
+      `${formatUnits(usdcOut, 6)} USDC -> ${formatUnits(wethBack, 18)} WETH | ` +
+      `gross=${formatUnits(grossProfit, 18)} flashFee=${formatUnits(flashPremium, 18)} ` +
+      `netBeforeGas=0 below floor`
+    );
+    return;
+  }
 
   let gasCost;
   try {
@@ -365,14 +440,17 @@ async function scanOnce() {
   }
 
   const requiredProfit = gasCost + (gasCost * cfg.minProfitMarginBps) / 10000n;
-  const grossProfit = wethBack > amountIn ? wethBack - amountIn : 0n;
-  const profitable = grossProfit >= requiredProfit;
+  const profitable = netProfitBeforeGas >= requiredProfit;
 
   console.log(
     `[${new Date().toISOString()}] ${formatUnits(amountIn, 18)} WETH -> ` +
     `${formatUnits(usdcOut, 6)} USDC -> ${formatUnits(wethBack, 18)} WETH | ` +
-    `gross=${formatUnits(grossProfit, 18)} required=${formatUnits(requiredProfit, 18)} ` +
-    `${profitable ? "✅ PROFITABLE" : "below floor"}`
+    `gross=${formatUnits(grossProfit, 18)} ` +
+    `flashFee=${formatUnits(flashPremium, 18)}(${flashPremiumBps}bps) ` +
+    `netBeforeGas=${formatUnits(netProfitBeforeGas, 18)} ` +
+    `gasFloor=${formatUnits(requiredProfit, 18)} ` +
+    `slippage=${cfg.slippageBps}bps ` +
+    `${profitable ? "PROFITABLE" : "below floor"}`
   );
 
   if (!profitable) return;
@@ -387,6 +465,14 @@ async function scanOnce() {
       console.log("legs route through the flash lender's own protocol — skipping (see legsUseFlashLenderProtocol).");
       return;
     }
+  }
+
+  try {
+    const simulatedProfit = await simulateExecution(legs, amountIn, requiredProfit);
+    console.log(`simulation OK: contract profit=${formatUnits(simulatedProfit, 18)} WETH`);
+  } catch (err) {
+    console.error("simulation rejected exact calldata:", err.shortMessage || err.message);
+    return;
   }
 
   await submit(legs, amountIn, requiredProfit);
