@@ -32,20 +32,18 @@ protocol's own official docs/GitHub) during this migration:**
   — confirmed via BaseScan, verified, 1M+ transactions
 - Base's canonical WETH predeploy: `0x4200000000000000000000000000000000000006`
 
-**NOT yet fork-tested or live-exercised (this is the real gap — "confirmed
-by research" is not the same as "proven by a real transaction," and this
-project has been burned by that gap before on zkSync):**
-- No leg of the Base triangle has been executed as a real transaction yet
-  — everything above was confirmed via read-only calls and cross-referenced
-  documentation, not a live executed swap the way zkSync's SyncSwap/Mute/
-  SpaceFi legs eventually were.
-- `TriangleArbAaveFlash` has NOT been fork-tested at all. The zkSync
-  version's flash contract only became trustworthy after fork-testing
-  revealed a real SyncSwap-reentrancy conflict that wasn't obvious from
-  reading the code — there is no equivalent finding for Aave V3 + Aerodrome
-  on Base yet, because the equivalent testing hasn't been done. See
-  `test/_archived-zksync/README.md` for exactly what that testing needs to
-  look like here.
+**Fork-tested, but not live-deployed or live-exercised with your own
+capital yet:**
+- Base fork tests execute real Uniswap V2 and Aerodrome swaps against live
+  Base state.
+- `TriangleArbAaveFlash` is fork-tested against Aave V3 on Base, including
+  a bare WETH flash-loan probe and a flash-loan-backed leg chain. Foundry is
+  pinned to `evm_version = "cancun"` because Aave's current Base
+  implementation uses opcodes that older fork EVM settings report as
+  `NotActivated`.
+- No production deployment from this repo has been funded and sent by the
+  bot yet. Treat fork success as integration proof, not proof that a live
+  opportunity is profitable or safe to submit publicly.
 - `AerodromeAdapter`'s stable-vs-volatile route selection
   (`quoteAerodrome` in `bot/scanner.js`) is a documented heuristic (try
   volatile, fall back to stable), not a "best route" guarantee — a thorough

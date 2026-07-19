@@ -15,6 +15,14 @@ interface IWETH is IERC20 {
     function deposit() external payable;
 }
 
+interface IAaveV3PoolPremium {
+    function FLASHLOAN_PREMIUM_TOTAL() external view returns (uint128);
+}
+
+interface IAaveV3PoolReserveData {
+    function getReserveData(address asset) external view;
+}
+
 contract FixedOutAdapter is ISwapAdapter {
     uint256 public nextAmountOut;
 
@@ -37,6 +45,40 @@ contract FixedOutAdapter is ISwapAdapter {
     }
 }
 
+contract AaveFlashProbe {
+    address public immutable pool;
+
+    constructor(address _pool) {
+        pool = _pool;
+    }
+
+    function flash(address asset, uint256 amount) external {
+        IAaveV3PoolForProbe(pool).flashLoanSimple(address(this), asset, amount, "", 0);
+    }
+
+    function executeOperation(
+        address asset,
+        uint256 amount,
+        uint256 premium,
+        address,
+        bytes calldata
+    ) external returns (bool) {
+        require(msg.sender == pool, "probe: lender");
+        IERC20(asset).approve(pool, amount + premium);
+        return true;
+    }
+}
+
+interface IAaveV3PoolForProbe {
+    function flashLoanSimple(
+        address receiverAddress,
+        address asset,
+        uint256 amount,
+        bytes calldata params,
+        uint16 referralCode
+    ) external;
+}
+
 contract BaseForkAdaptersTest is Test {
     address constant WETH = 0x4200000000000000000000000000000000000006;
     address constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
@@ -49,6 +91,40 @@ contract BaseForkAdaptersTest is Test {
     UniswapV2Adapter uniAdapter;
     AerodromeAdapter aeroAdapter;
     FixedOutAdapter fixedOutAdapter;
+
+    function _aaveWethFlashAmount() internal returns (uint256) {
+        (bool ok, bytes memory data) = AAVE_V3_POOL.staticcall(
+            abi.encodeWithSelector(IAaveV3PoolReserveData.getReserveData.selector, WETH)
+        );
+        require(ok && data.length >= 288, "reserve data failed");
+
+        uint256 configuration;
+        address aTokenAddress;
+        assembly {
+            configuration := mload(add(data, 0x20))
+            aTokenAddress := mload(add(data, 0x120))
+        }
+
+        bool active = ((configuration >> 56) & 1) == 1;
+        bool frozen = ((configuration >> 57) & 1) == 1;
+        bool paused = ((configuration >> 60) & 1) == 1;
+        bool flashLoanEnabled = ((configuration >> 63) & 1) == 1;
+
+        if (!active || frozen || paused || !flashLoanEnabled) {
+            vm.skip(true);
+        }
+
+        uint256 poolBalance = IERC20(WETH).balanceOf(aTokenAddress);
+        uint256 targetAmount = 0.00005 ether;
+        uint256 minUsefulAmount = 0.00001 ether;
+
+        if (poolBalance < minUsefulAmount * 2) {
+            vm.skip(true);
+        }
+
+        uint256 halfPoolBalance = poolBalance / 2;
+        return halfPoolBalance < targetAmount ? halfPoolBalance : targetAmount;
+    }
 
     function setUp() public {
         if (block.chainid != 8453) {
@@ -132,10 +208,22 @@ contract BaseForkAdaptersTest is Test {
         assertEq(IERC20(WETH).balanceOf(address(arb)), amountIn + minProfit);
     }
 
+    function test_aaveBareWethFlashLoanWorksOnBaseFork() public {
+        uint256 amountIn = _aaveWethFlashAmount();
+        uint256 premium = (amountIn * IAaveV3PoolPremium(AAVE_V3_POOL).FLASHLOAN_PREMIUM_TOTAL()) / 10_000;
+        AaveFlashProbe probe = new AaveFlashProbe(AAVE_V3_POOL);
+
+        IERC20(WETH).transfer(address(probe), premium);
+
+        probe.flash(WETH, amountIn);
+
+        assertEq(IERC20(WETH).balanceOf(address(probe)), 0);
+    }
+
     function test_aaveFlashTriangleExecutesOnBaseForkWithLivePool() public {
-        uint256 amountIn = 0.001 ether;
+        uint256 amountIn = _aaveWethFlashAmount();
         uint256 minProfit = 0.00001 ether;
-        uint256 premium = (amountIn * 5) / 10_000;
+        uint256 premium = (amountIn * IAaveV3PoolPremium(AAVE_V3_POOL).FLASHLOAN_PREMIUM_TOTAL()) / 10_000;
 
         TriangleArbAaveFlash arb = new TriangleArbAaveFlash(AAVE_V3_POOL);
         arb.setAdapterAllowed(address(uniAdapter), true);
@@ -163,7 +251,7 @@ contract BaseForkAdaptersTest is Test {
     }
 
     function test_aaveFlashCanRouteThroughAerodromeBeforeProfitGuardOnBaseFork() public {
-        uint256 amountIn = 0.001 ether;
+        uint256 amountIn = _aaveWethFlashAmount();
 
         TriangleArbAaveFlash arb = new TriangleArbAaveFlash(AAVE_V3_POOL);
         arb.setAdapterAllowed(address(uniAdapter), true);

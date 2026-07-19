@@ -31,15 +31,10 @@ import {IAaveV3Pool, IAaveV3FlashLoanReceiver} from "./interfaces/IAaveV3Flash.s
 /// loan this contract itself initiated (msg.sender == pool AND initiator ==
 /// address(this)), and the pool address is immutable and set at deployment.
 ///
-/// KNOWN CONSTRAINT TO VERIFY BEFORE MAINNET USE (unlike TriangleArbFlash's
-/// fork-test-confirmed SyncSwap constraint, this has NOT yet been fork-
-/// tested against Aave V3 on Base): check whether routing a leg through a
-/// DEX that itself deposits into or reads from Aave (e.g. an Aave-integrated
-/// stable pool) causes any reentrancy-guard conflict analogous to the
-/// SyncSwap Vault issue. Aave V3's Pool has its own reentrancy protections;
-/// the specific interaction with routing through Aave-adjacent liquidity
-/// mid-flash-loan is unconfirmed here and should be fork-tested (see
-/// test/ForkIntegration.t.sol pattern) before relying on it.
+/// BASE FORK STATUS: fork tests confirm a bare Aave WETH flash loan, a
+/// flash-loan-backed leg chain, and a route through real Uniswap V2 +
+/// Aerodrome liquidity. Re-run those tests before deployment, because live
+/// Aave reserve flags/liquidity can change.
 contract TriangleArbAaveFlash is TriangleArbBase, IAaveV3FlashLoanReceiver {
     IAaveV3Pool public immutable pool;
 

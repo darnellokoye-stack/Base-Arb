@@ -88,6 +88,32 @@ const AAVE_POOL_ABI = [
     inputs: [],
     outputs: [{ type: "uint128" }],
   },
+  {
+    name: "getReserveData",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "asset", type: "address" }],
+    outputs: [{
+      type: "tuple",
+      components: [
+        { name: "configuration", type: "uint256" },
+        { name: "liquidityIndex", type: "uint128" },
+        { name: "currentLiquidityRate", type: "uint128" },
+        { name: "variableBorrowIndex", type: "uint128" },
+        { name: "currentVariableBorrowRate", type: "uint128" },
+        { name: "currentStableBorrowRate", type: "uint128" },
+        { name: "lastUpdateTimestamp", type: "uint40" },
+        { name: "id", type: "uint16" },
+        { name: "aTokenAddress", type: "address" },
+        { name: "stableDebtTokenAddress", type: "address" },
+        { name: "variableDebtTokenAddress", type: "address" },
+        { name: "interestRateStrategyAddress", type: "address" },
+        { name: "accruedToTreasury", type: "uint128" },
+        { name: "unbacked", type: "uint128" },
+        { name: "isolationModeTotalDebt", type: "uint128" },
+      ],
+    }],
+  },
 ];
 
 const HOP_COMPONENTS = [
@@ -238,15 +264,36 @@ async function checkFlashLoanCapacity(startToken, amountIn) {
     },
   ];
   try {
-    const poolBalance = await publicClient.readContract({
+    const reserveData = await publicClient.readContract({
+      address: cfg.flashLoan.aavePool,
+      abi: AAVE_POOL_ABI,
+      functionName: "getReserveData",
+      args: [startToken],
+    });
+    const configuration = reserveData.configuration ?? reserveData[0];
+    const aTokenAddress = reserveData.aTokenAddress ?? reserveData[8];
+    const active = ((configuration >> 56n) & 1n) === 1n;
+    const frozen = ((configuration >> 57n) & 1n) === 1n;
+    const paused = ((configuration >> 60n) & 1n) === 1n;
+    const flashLoanEnabled = ((configuration >> 63n) & 1n) === 1n;
+
+    if (!active || frozen || paused || !flashLoanEnabled) {
+      console.log(
+        "Aave reserve is not flash-loanable for this asset " +
+        `(active=${active}, frozen=${frozen}, paused=${paused}, flashLoanEnabled=${flashLoanEnabled}).`
+      );
+      return false;
+    }
+
+    const availableLiquidity = await publicClient.readContract({
       address: startToken,
       abi: ERC20_BALANCE_ABI,
       functionName: "balanceOf",
-      args: [cfg.flashLoan.aavePool],
+      args: [aTokenAddress],
     });
-    return poolBalance >= amountIn;
+    return availableLiquidity >= amountIn;
   } catch (err) {
-    console.error("Aave pool balance check failed:", err.shortMessage || err.message);
+    console.error("Aave flash capacity check failed:", err.shortMessage || err.message);
     return false; // fail closed
   }
 }

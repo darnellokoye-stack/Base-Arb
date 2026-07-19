@@ -63,17 +63,21 @@ OWNER_ADDRESS=0x...                    # if PRIVATE_KEY is omitted, set this to 
                                         # so gas estimation still simulates as the real owner
 ```
 
-## What has NOT been fork-tested for Base yet
+## Base fork testing status
 
-Unlike the zkSync-era `TriangleArbFlash` (whose SyncSwap-reentrancy
-conflict was found via fork testing — see main README's "Fork test
-findings"), `TriangleArbAaveFlash` has NOT been fork-tested against real
-Base state. Before trusting it with real capital, adapt the pattern in
-`test/ForkIntegration.t.sol` to fork Base mainnet and confirm:
+`TriangleArbAaveFlash` is now fork-tested against real Base state. The
+active fork suite confirms:
 
-- A full flash-loan round trip actually succeeds against live Aave V3 +
-  Uniswap V2 + Aerodrome liquidity, not just against mocks
-- Whether routing a leg through Aerodrome (which itself may have
-  Aave-adjacent stable-pool integrations) causes any reentrancy conflict
-  analogous to the SyncSwap one — this is flagged as unconfirmed in
-  TriangleArbAaveFlash.sol's header comment, not assumed safe
+- A bare WETH flash loan succeeds against Aave V3 on Base
+- A flash-loan-backed leg chain reaches repayment/profit accounting
+- A route through real Uniswap V2 and Aerodrome liquidity reaches the
+  expected profit guard instead of failing at Aave entry
+
+Run the fork tests with Foundry's configured Cancun EVM setting:
+
+```bash
+forge test --fork-url https://mainnet.base.org --match-contract BaseForkAdaptersTest
+```
+
+This proves integration shape, not live profitability. Re-run it right
+before deployment, because live reserve flags/liquidity can change.
