@@ -93,6 +93,8 @@ BASE_AERODROME_ADAPTER=0x...
 PRIVATE_KEY=0x...                # omit to dry-run only
 OWNER_ADDRESS=0x...              # required for dry-run gas/simulation if PRIVATE_KEY is omitted
 SLIPPAGE_BPS=50                  # optional, per-leg output floor buffer; default 0.50%
+BASE_TRIANGLE_TOKENS=0x...,0x... # extra middle-token universe for WETH -> A -> B -> WETH routes
+MAX_ROUTE_CANDIDATES=50          # max quoted candidates evaluated per scan cycle
 npm run scan                     # pre-funded mode
 npm run scan:flash               # Aave V3 flash-loan mode
 ```
@@ -103,6 +105,24 @@ adds the gas-aware profit floor, applies per-leg slippage floors to the
 exact calldata, and runs an `eth_call` simulation before any transaction is
 submitted. If the exact calldata cannot clear the contract's
 `minProfit` guard, it is skipped.
+
+The scanner generates real 3-hop candidate cycles:
+`WETH -> tokenA -> tokenB -> WETH`. `BASE_USDC` is included automatically;
+add at least one more verified token address in `BASE_TRIANGLE_TOKENS` for
+real triangles. Each hop is quoted against both Uniswap V2 and Aerodrome,
+then the best candidates are gas/simulation checked.
+
+Backrun monitoring is dry-run only:
+
+```bash
+BASE_WS_RPC_URL=wss://...
+npm run backrun:watch
+```
+
+It decodes pending swaps against the configured Uniswap V2 and Aerodrome
+routers and reports impacted paths. It does not submit transactions. Real
+backrunning should be wired to private bundle/post-victim simulation first;
+public mempool submission is not a production-safe path.
 
 ## The solo-dev edges (Base-specific angle, separate from the core
 migration above)

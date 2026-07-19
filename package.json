@@ -5,6 +5,7 @@
   "scripts": {
     "scan": "node bot/scanner.js",
     "scan:flash": "FLASH_MODE=1 node bot/scanner.js",
+    "backrun:watch": "node bot/backrun-monitor.js",
     "base:new-pools": "node bot/base-edges/new-pool-listener.js"
   },
   "dependencies": {

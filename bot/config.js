@@ -8,6 +8,14 @@
 const RPC_URL = process.env.BASE_RPC_URL || "https://mainnet.base.org";
 const WS_RPC_URL = process.env.BASE_WS_RPC_URL || null;
 
+function parseAddressList(value) {
+  if (!value) return [];
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
 module.exports = {
   RPC_URL,
   WS_RPC_URL,
@@ -80,6 +88,8 @@ module.exports = {
   gasPriceBufferBps: BigInt(process.env.GAS_PRICE_BUFFER_BPS || 2000), // +20%
   minProfitMarginBps: BigInt(process.env.MIN_PROFIT_MARGIN_BPS || 0),
   slippageBps: BigInt(process.env.SLIPPAGE_BPS || 50), // 0.50% per leg
+  maxRouteCandidates: Number(process.env.MAX_ROUTE_CANDIDATES || 50),
+  triangleTokens: parseAddressList(process.env.BASE_TRIANGLE_TOKENS),
 
   amountInWei: BigInt(process.env.AMOUNT_IN_WEI || "100000000000000000"), // 0.1 WETH default
 };

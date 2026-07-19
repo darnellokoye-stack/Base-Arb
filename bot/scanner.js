@@ -267,6 +267,146 @@ function applySlippageFloor(amount) {
   return (amount * (10000n - cfg.slippageBps)) / 10000n;
 }
 
+function uniqueAddresses(addresses) {
+  const seen = new Set();
+  const out = [];
+  for (const address of addresses.filter(Boolean)) {
+    const key = address.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(address);
+  }
+  return out;
+}
+
+function routeLabel(route) {
+  return route.legs
+    .map((leg) => `${leg.venue}:${leg.tokenIn.slice(0, 6)}->${leg.tokenOut.slice(0, 6)}`)
+    .join(" | ");
+}
+
+async function quoteVenue(venue, tokenIn, tokenOut, amountIn) {
+  if (venue === "univ2") {
+    return {
+      venue,
+      tokenIn,
+      tokenOut,
+      amountIn,
+      amountOut: await quoteUniV2(cfg.dexes.uniswapV2Router, tokenIn, tokenOut, amountIn),
+      stable: false,
+    };
+  }
+
+  if (venue === "aerodrome") {
+    const quote = await quoteAerodrome(
+      cfg.dexes.aerodromeRouter,
+      tokenIn,
+      tokenOut,
+      amountIn,
+      cfg.dexes.aerodromeFactory
+    );
+    return {
+      venue,
+      tokenIn,
+      tokenOut,
+      amountIn,
+      amountOut: quote.amountOut,
+      stable: quote.stable,
+    };
+  }
+
+  throw new Error(`unsupported venue ${venue}`);
+}
+
+function legFromQuote(quote) {
+  const amountOutMin = applySlippageFloor(quote.amountOut);
+  const adapter = quote.venue === "univ2" ? cfg.contracts.uniswapV2Adapter : cfg.contracts.aerodromeAdapter;
+  const extraData = quote.venue === "univ2"
+    ? "0x"
+    : encodeAerodromeExtraData(quote.stable, cfg.dexes.aerodromeFactory);
+
+  return {
+    adapter,
+    hops: [{
+      tokenIn: quote.tokenIn,
+      tokenOut: quote.tokenOut,
+      amountOutMin,
+      extraData,
+    }],
+    amountOutMin,
+  };
+}
+
+async function quoteTrianglePath(tokenA, tokenB, amountIn) {
+  const venues = ["univ2", "aerodrome"];
+  const candidates = [];
+
+  for (const venue0 of venues) {
+    let leg0;
+    try {
+      leg0 = await quoteVenue(venue0, cfg.tokens.WETH, tokenA, amountIn);
+    } catch (_) {
+      continue;
+    }
+
+    for (const venue1 of venues) {
+      let leg1;
+      try {
+        leg1 = await quoteVenue(venue1, tokenA, tokenB, leg0.amountOut);
+      } catch (_) {
+        continue;
+      }
+
+      for (const venue2 of venues) {
+        try {
+          const leg2 = await quoteVenue(venue2, tokenB, cfg.tokens.WETH, leg1.amountOut);
+          candidates.push({
+            legs: [leg0, leg1, leg2],
+            amountOut: leg2.amountOut,
+          });
+        } catch (_) {
+          // Missing pair/liquidity for this venue; try the next venue.
+        }
+      }
+    }
+  }
+
+  return candidates;
+}
+
+async function buildRouteCandidates(amountIn) {
+  const middleTokens = uniqueAddresses([
+    cfg.tokens.USDC,
+    ...cfg.triangleTokens,
+  ]).filter((token) => token.toLowerCase() !== cfg.tokens.WETH.toLowerCase());
+
+  if (middleTokens.length < 2) {
+    console.warn(
+      "Need at least two non-WETH tokens for real 3-hop triangles. " +
+      "Set BASE_TRIANGLE_TOKENS as a comma-separated address list."
+    );
+    return [];
+  }
+
+  const candidates = [];
+  for (const tokenA of middleTokens) {
+    for (const tokenB of middleTokens) {
+      if (tokenA.toLowerCase() === tokenB.toLowerCase()) continue;
+      const quoted = await quoteTrianglePath(tokenA, tokenB, amountIn);
+      candidates.push(...quoted);
+      if (candidates.length >= cfg.maxRouteCandidates) {
+        return candidates
+          .sort((a, b) => (a.amountOut > b.amountOut ? -1 : a.amountOut < b.amountOut ? 1 : 0))
+          .slice(0, cfg.maxRouteCandidates);
+      }
+    }
+  }
+
+  return candidates
+    .sort((a, b) => (a.amountOut > b.amountOut ? -1 : a.amountOut < b.amountOut ? 1 : 0))
+    .slice(0, cfg.maxRouteCandidates);
+}
+
 async function gasCostInStartToken(legs, amountIn, minProfitGuess, startToken) {
   if (!ESTIMATION_ACCOUNT) {
     throw new Error(
@@ -351,9 +491,88 @@ async function submit(legs, amountIn, minProfit) {
   console.log(`submitted: ${hash}`);
 }
 
+async function evaluateAndMaybeSubmit(route, amountIn, startToken, flashFee) {
+  const legs = route.legs.map(legFromQuote);
+  const wethBack = route.amountOut;
+  const grossProfit = wethBack > amountIn ? wethBack - amountIn : 0n;
+  const flashPremium = flashFee ? flashFee.premium : 0n;
+  const flashPremiumBps = flashFee ? flashFee.premiumBps : 0n;
+  const netProfitBeforeGas = grossProfit > flashPremium ? grossProfit - flashPremium : 0n;
+
+  if (FLASH_MODE && netProfitBeforeGas === 0n) return false;
+
+  let gasCost;
+  try {
+    gasCost = await gasCostInStartToken(legs, amountIn, 0n, startToken);
+  } catch (err) {
+    console.error(`gas estimation rejected ${routeLabel(route)}:`, err.shortMessage || err.message);
+    return false;
+  }
+
+  const requiredProfit = gasCost + (gasCost * cfg.minProfitMarginBps) / 10000n;
+  const profitable = netProfitBeforeGas >= requiredProfit;
+
+  console.log(
+    `[${new Date().toISOString()}] ${routeLabel(route)} | ` +
+    `back=${formatUnits(wethBack, 18)} WETH ` +
+    `gross=${formatUnits(grossProfit, 18)} ` +
+    `flashFee=${formatUnits(flashPremium, 18)}(${flashPremiumBps}bps) ` +
+    `netBeforeGas=${formatUnits(netProfitBeforeGas, 18)} ` +
+    `gasFloor=${formatUnits(requiredProfit, 18)} ` +
+    `slippage=${cfg.slippageBps}bps ` +
+    `${profitable ? "PROFITABLE" : "below floor"}`
+  );
+
+  if (!profitable) return false;
+
+  if (FLASH_MODE && legsUseFlashLenderProtocol(legs)) {
+    console.log("legs route through the flash lender's own protocol; skipping.");
+    return false;
+  }
+
+  try {
+    const simulatedProfit = await simulateExecution(legs, amountIn, requiredProfit);
+    console.log(`simulation OK: contract profit=${formatUnits(simulatedProfit, 18)} WETH`);
+  } catch (err) {
+    console.error("simulation rejected exact calldata:", err.shortMessage || err.message);
+    return false;
+  }
+
+  await submit(legs, amountIn, requiredProfit);
+  return true;
+}
+
 async function scanOnce() {
   const amountIn = cfg.amountInWei;
   const startToken = cfg.tokens.WETH;
+
+  const candidates = await buildRouteCandidates(amountIn);
+  if (candidates.length === 0) {
+    console.log(`[${new Date().toISOString()}] no route candidates quoted`);
+    return;
+  }
+
+  let flashFee = null;
+  if (FLASH_MODE) {
+    const hasCapacity = await checkFlashLoanCapacity(startToken, amountIn);
+    if (!hasCapacity) {
+      console.log("Aave pool lacks capacity for this loan size; skipping.");
+      return;
+    }
+    try {
+      flashFee = await getAaveFlashPremium(amountIn);
+    } catch (err) {
+      console.error("Aave flash premium read failed:", err.shortMessage || err.message);
+      return;
+    }
+  }
+
+  for (const candidate of candidates) {
+    const submitted = await evaluateAndMaybeSubmit(candidate, amountIn, startToken, flashFee);
+    if (submitted) return;
+  }
+
+  return;
 
   // Triangle: WETH -> USDC (Uniswap V2) -> WETH (Aerodrome). A genuinely
   // 3-DEX triangle needs a third distinct venue for a real middle leg;
